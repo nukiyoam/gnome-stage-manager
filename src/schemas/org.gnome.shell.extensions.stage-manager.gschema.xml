@@ -204,10 +204,10 @@
         </key>
 
         <key name="arc-hover-fan-delay" type="i">
-            <default>0</default>
+            <default>350</default>
             <range min="0" max="3000"/>
             <summary>Arc Hover Fan Delay</summary>
-            <description>How long (milliseconds) the pointer must rest on a group before its windows fan out automatically. 0 disables hover fan-out, so a group only fans out when clicked or scrolled.</description>
+            <description>How long (milliseconds) the pointer must rest on a group before its windows fan out in the sidebar. Clicking a group always switches to it instead, so this is the only way to peek inside one. 0 disables hover fan-out.</description>
         </key>
 
         <key name="arc-fan-hold" type="b">
@@ -247,15 +247,21 @@
             <description>When an application is opened from the overview and an active card/group exists, join the new window to that active group instead of giving it its own card.</description>
         </key>
 
+        <!-- Deprecated and no longer read or written. Arc groups are keyed by a
+             per-session window number, so persisting them made unrelated windows
+             inherit old groupings after a login. Kept so existing profiles load. -->
         <key name="arc-merge-map" type="s">
             <default>'{}'</default>
-            <summary>Arc Merge Map (internal)</summary>
+            <summary>Arc Merge Map (deprecated)</summary>
             <description>Internal JSON map of appId to merge-group key for the arc sidebar's drag-to-merge gesture. Not intended for manual editing.</description>
         </key>
 
+        <!-- Deprecated and no longer read or written. Arc groups are keyed by a
+             per-session window number, so persisting them made unrelated windows
+             inherit old groupings after a login. Kept so existing profiles load. -->
         <key name="arc-order-map" type="s">
             <default>'{}'</default>
-            <summary>Arc Order Map (internal)</summary>
+            <summary>Arc Order Map (deprecated)</summary>
             <description>Internal JSON map of merge-group key to display order for the arc sidebar's drag-to-reorder gesture. Not intended for manual editing.</description>
         </key>
 

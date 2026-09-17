@@ -41,6 +41,7 @@ const MAX_SNAPSHOTS = 8;
 const KEYBIND_NAME = 'toggle-sidebar';
 const SHOW_DESKTOP_KEYBIND = 'keybinding-show-desktop';
 const APP_DRAG_THRESHOLD = 18;    // logical px — past this, a press+release is a drag, not a click
+const APP_GHOST_SIZE = 96;        // logical px; the card thumbnail that follows the pointer
 // Last-resort geometry when the compositor reports no monitor at all (see _getMon).
 const MON_FALLBACK = { x: 0, y: 0, width: 1920, height: 1080, index: 0 };
 
@@ -187,9 +188,11 @@ class MaximizeToWorkspace {
             // Only the outbound move is opt-in — a window already parked must
             // still be able to return even if the setting was since changed.
             if (this._settings.get_string('maximize-behavior') !== 'workspace') return;
-            // Only a FULL maximize (both axes) moves the window — edge tiling
+            // Only a FULL maximize (both axes) moves the window; edge tiling
             // (snapping to a half) is a single-axis maximize and must stay put.
-            if ((win.is_maximized() & Meta.MaximizeFlags.BOTH) !== Meta.MaximizeFlags.BOTH) return;
+            // is_maximized() is a gboolean, not MetaMaximizeFlags, so the per-axis
+            // properties are the only way to tell the two apart.
+            if (!win.maximized_horizontally || !win.maximized_vertically) return;
             this._handleMaximize(win);
         } else if (change === Meta.SizeChange.UNMAXIMIZE) {
             this._handleUnmaximize(win);
@@ -308,6 +311,7 @@ class StageSidebar {
 
         this._appMergeMap = new Map();   // appId -> resolved merge-group key, see _groupByApp
         this._appDrag = null;            // in-flight drag-to-merge candidate, see _startAppDragCandidate
+        this._appDragGhost = null;       // thumbnail following the pointer during that drag
 
         // win → group id it was promoted out of by maximize-behavior='stage',
         // so unmaximize can put it back instead of stranding it in a lone stage.
@@ -425,6 +429,7 @@ class StageSidebar {
         this._sigSources.clear();
         this._disconnectCardSigs();
         this._cancelAppDrag();
+        this._killAppDragGhost();
         // Then preview + card content (cards live inside _box).
         this._destroyPreview();
         this._safeDestroyContent();
@@ -641,9 +646,55 @@ class StageSidebar {
         const [px, py] = event.get_coords();
         const dx = px - this._appDrag.startX;
         const dy = py - this._appDrag.startY;
-        if (Math.hypot(dx, dy) > APP_DRAG_THRESHOLD * this._scaleFactor)
+        if (!this._appDrag.moved &&
+            Math.hypot(dx, dy) > APP_DRAG_THRESHOLD * this._scaleFactor) {
             this._appDrag.moved = true;
+            this._startAppDragGhost(this._appDrag.group);
+        }
+        if (this._appDrag.moved) this._updateAppDragGhost(px, py);
         return Clutter.EVENT_PROPAGATE;
+    }
+
+    /** Thumbnail that follows the pointer while merging. Without it the gesture
+     *  gave no feedback at all, so a merge looked like nothing was happening. */
+    _startAppDragGhost(group) {
+        this._killAppDragGhost();
+        const size = Math.round(APP_GHOST_SIZE * this._scaleFactor);
+        const ghost = new St.Widget({
+            reactive: false, width: size, height: size, opacity: 230,
+            style_class: this._cls('stage-drag-ghost'),
+        });
+        ghost.set_pivot_point(0.5, 0.5);
+
+        // Reuse the card thumbnail builder so the ghost looks like what is
+        // being dragged; the icon fallback is already handled in there.
+        const windows = group.windows ?? [];
+        const thumb = this._makeWindowClone(windows[0], size, size);
+        if (thumb) {
+            thumb.set_position(
+                Math.round((size - thumb.width) / 2),
+                Math.round((size - thumb.height) / 2));
+            ghost.add_child(thumb);
+        } else if (windows[0]) {
+            this._addIconFallback(ghost, windows[0], size, size);
+        }
+
+        Main.uiGroup.add_child(ghost);
+        this._appDragGhost = ghost;
+    }
+
+    _updateAppDragGhost(px, py) {
+        if (!this._appDragGhost) return;
+        const half = Math.round(APP_GHOST_SIZE * this._scaleFactor / 2);
+        this._appDragGhost.set_position(px - half, py - half);
+    }
+
+    _killAppDragGhost() {
+        if (this._appDragGhost) {
+            _nullCloneSources(this._appDragGhost);
+            this._appDragGhost.destroy();
+            this._appDragGhost = null;
+        }
     }
 
     /** Resolve a pending drag on release; true = consumed, caller skips its
@@ -671,6 +722,7 @@ class StageSidebar {
     }
 
     _cancelAppDrag() {
+        this._killAppDragGhost();
         this._appDrag = null;
         global.stage.disconnectObject(this);
     }
@@ -689,6 +741,19 @@ class StageSidebar {
     _insidePanel(actor) {
         if (!actor || !this._panel) return false;
         return actor === this._panel || this._panel.contains(actor);
+    }
+
+    /** Whether the pointer sits over the panel's SETTLED rectangle. Uses the
+     *  visible position, not the current one, so a check made mid-slide isn't
+     *  fooled by the panel still being off screen. */
+    _pointerOverPanel() {
+        if (!this._panel) return false;
+        const mon = _getMon();
+        const topH = Main.panel ? Main.panel.height : 0;
+        const [vx, vy] = this._panelVisiblePos(mon, topH);
+        const [pw, ph] = this._panelSize(mon, topH);
+        const [px, py] = global.get_pointer();
+        return px >= vx && px < vx + pw && py >= vy && py < vy + ph;
     }
 
     /** ease() property for the perspective tilt — Y axis for a column, X for a
@@ -838,6 +903,9 @@ class StageSidebar {
             if (this._visible) this._refresh();
         });
         this._sig(this._settings, 'changed::show-group-count', () => {
+            if (this._visible) this._refresh();
+        });
+        this._sig(this._settings, 'changed::show-workspace-current', () => {
             if (this._visible) this._refresh();
         });
         this._sig(this._settings, 'changed::card-base-scale', () => {
@@ -1212,9 +1280,11 @@ class StageSidebar {
         this._timers.push(this._swapTimer);
 
         this._hovered = false;
-        // Reuses the single _refreshTimer slot — killing it first means a swap
-        // refresh and a debounced refresh can never both be queued.
-        this._killRefreshTimer();
+        // Reuses the single _refreshTimer slot, so a swap refresh and a debounced
+        // refresh can never both be queued. EGO-L-007: the remove is inlined
+        // rather than going through _killRefreshTimer(), because shexli only
+        // recognises it when it sits textually adjacent to the re-arm.
+        if (this._refreshTimer) { GLib.source_remove(this._refreshTimer); this._untrackTimer(this._refreshTimer); this._refreshTimer = null; }
         this._refreshTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 80, () => {
             this._untrackTimer(this._refreshTimer); this._refreshTimer = null;
             if (this._visible) this._refresh();
@@ -1319,8 +1389,11 @@ class StageSidebar {
         if (this._fullscreen()) return;
 
         this._visible = true;
-        this._killHideTimer();
         this._refresh();
+        // AFTER the refresh, which re-arms the hide when the pointer is away.
+        // An explicit reveal (keybinding, force-show, edge dwell) must win, or
+        // it would hide itself again a moment later without the user acting.
+        this._killHideTimer();
         this._syncEdge();
 
         const [vx, vy] = this._panelVisiblePos(_getMon(), Main.panel ? Main.panel.height : 0);
@@ -1392,10 +1465,12 @@ class StageSidebar {
         this._signature = signature;
 
         // Cards about to be destroyed may be under the pointer with no leave-event
-        // coming — tear down hover state here or `_hovered` sticks true forever.
+        // coming, so re-derive hover from the pointer instead of assuming it left.
+        // Blindly clearing it stranded the sidebar open: nothing was left to
+        // fire a leave-event, and nothing re-armed the hide timer.
         this._killHoverTimer();
         this._destroyPreview();
-        this._hovered = false;
+        this._hovered = this._pointerOverPanel();
 
         this._disconnectCardSigs();
         this._cards = [];
@@ -1414,6 +1489,12 @@ class StageSidebar {
             this._refreshGroups();
 
         this._animateCardsEntrance();
+
+        // The rebuild consumed any pending leave-event, so if the pointer is
+        // away the hide has to be re-armed here or the sidebar stays up.
+        if (!this._hovered && this._visible &&
+            this._settings.get_boolean('sidebar-auto-hide'))
+            this._scheduleHide();
     }
 
     /** Fingerprint of everything _refresh() would draw, so a refresh is skipped
@@ -1463,23 +1544,23 @@ class StageSidebar {
                 parts.push(`${i}:${wins.map(winSig).join('.')}`);
             }
         } else {
-            const groups = _groupByApp(this._activeWs(), null, this._appMergeMap);
-            for (const g of groups)
-                parts.push(`${g.key}:${ids(g.windows)}`);
+            for (const g of this._getInactiveGroups())
+                parts.push(`${g.id}:${ids(this._groupWindows(g))}`);
         }
         return parts.join('|');
     }
 
     _refreshGroups() {
-        // Show every app on the active workspace as a card — the same content
-        // the arc layout renders, just presented as a vertical stack. This keeps
-        // the sidebar from ever looking empty when apps are open.
-        const groups = _groupByApp(this._activeWs(), null, this._appMergeMap);
-        for (const group of groups.slice(0, MAX_GROUPS)) {
-            const card = this._makeAppCard(group);
+        // Inactive STAGES, not apps: clicking one swaps to it (_swapToGroup).
+        // Rendering apps here made this mode a duplicate of 'apps' and left the
+        // swap unreachable, and its user-time ordering rebuilt every card on
+        // each focus change.
+        const all = this._getInactiveGroups();
+        for (const group of all.slice(0, MAX_GROUPS)) {
+            const card = this._makeGroupCard(group);
             if (card) { this._box.add_child(card); this._cards.push(card); }
         }
-        this._addOverflowLabel(groups.length - MAX_GROUPS);
+        this._addOverflowLabel(all.length - MAX_GROUPS);
     }
 
     _refreshApps() {
@@ -2345,6 +2426,9 @@ class ArcSidebar {
         this._dragPollTimer = null;
         this._edgeTimer = null;          // pointer-dwell before an edge reveal
         this._fanCollapseTimer = null;   // delayed fan collapse (arc-fan-hold)
+        this._newWindowTimer = null;     // batched window-created settle
+        this._overviewSyncTimer = null;  // post-overview group sync
+        this._pendingNewWindows = [];    // drained by _newWindowTimer
 
         this._groups = [];
         this._offset = 0;
@@ -2387,9 +2471,8 @@ class ArcSidebar {
         this._sig(Main.overview, 'hidden', () => this._onOverviewHidden());
         this._sig(Main.layoutManager, 'monitors-changed', () => this._rebuild());
         this._sig(this._settings, 'changed', (_s, key) => {
-            if (key === 'arc-order-map') { this._loadOrderMap(); this._scheduleRefresh(); }
-            else if (key === 'arc-merge-map') { this._loadMergeMap(); this._scheduleRefresh(); }
-            else if (key === 'arc-persistent-mode') {
+            // arc-merge-map / arc-order-map are no longer read or written.
+            if (key === 'arc-persistent-mode') {
                 this._persistEnabled = this._settings.get_boolean('arc-persistent-mode');
                 if (this._persistEnabled) this._armPersistTimer();
                 else { this._killPersistTimer(); this._persistMode = false; }
@@ -2414,7 +2497,11 @@ class ArcSidebar {
         this._killPersistTimer();
         this._killRefreshTimer();
         this._killEdgeTimer();
+        this._killFanCollapseTimer();
+        this._killNewWindowTimer();
+        this._killOverviewSyncTimer();
         this._killCardTimers();
+        this._pendingNewWindows = [];
         // Anything the named fields above did not cover.
         this._timers.splice(0).forEach(id => GLib.source_remove(id));
 
@@ -2455,6 +2542,8 @@ class ArcSidebar {
     _killRefreshTimer() { if (this._refreshTimer) { GLib.source_remove(this._refreshTimer); this._untrackTimer(this._refreshTimer); this._refreshTimer = null; } }
     _killDragPollTimer() { if (this._dragPollTimer) { GLib.source_remove(this._dragPollTimer); this._untrackTimer(this._dragPollTimer); this._dragPollTimer = null; } }
     _killEdgeTimer() { if (this._edgeTimer) { GLib.source_remove(this._edgeTimer); this._untrackTimer(this._edgeTimer); this._edgeTimer = null; } }
+    _killNewWindowTimer() { if (this._newWindowTimer) { GLib.source_remove(this._newWindowTimer); this._untrackTimer(this._newWindowTimer); this._newWindowTimer = null; } }
+    _killOverviewSyncTimer() { if (this._overviewSyncTimer) { GLib.source_remove(this._overviewSyncTimer); this._untrackTimer(this._overviewSyncTimer); this._overviewSyncTimer = null; } }
 
     _killCardTimers() {
         this._containers.forEach(c => this._killGridTimers(c._grid));
@@ -2481,37 +2570,25 @@ class ArcSidebar {
 
     _pickMonitor() { return _getMon(); }
 
+    // Groups are keyed by _windowKey(), i.e. get_stable_sequence(), which is a
+    // per-SESSION counter. Persisting that to dconf meant the numbers were
+    // reused by unrelated windows after the next login, silently pre-grouping
+    // them. Both maps are therefore in-memory only and reset each session; the
+    // two gschema keys are kept (deprecated) so existing profiles still load.
     _loadMergeMap() {
-        const raw = this._settings.get_string('arc-merge-map');
-        try {
-            this._mergeMap = new Map(Object.entries(JSON.parse(raw)));
-        } catch (_) {
-            this._mergeMap = new Map();
-        }
-        // Repair maps from versions that folded a group key back in as an app id:
-        // drop those phantom entries (no app id contains the join separator),
-        // then collapse the duplicate segments they left behind.
-        for (const [aId, gKey] of [...this._mergeMap]) {
-            if (aId.includes('|')) this._mergeMap.delete(aId);
-            else this._mergeMap.set(aId, [...new Set(gKey.split('|'))].sort().join('|'));
-        }
+        this._mergeMap = new Map();
     }
 
     _saveMergeMap() {
-        this._settings.set_string('arc-merge-map', JSON.stringify(Object.fromEntries(this._mergeMap)));
+        // Intentionally does not touch dconf; see the note above.
     }
 
     _loadOrderMap() {
-        const raw = this._settings.get_string('arc-order-map');
-        try {
-            this._orderMap = new Map(Object.entries(JSON.parse(raw)).map(([k, v]) => [k, Number(v)]));
-        } catch (_) {
-            this._orderMap = new Map();
-        }
+        this._orderMap = new Map();
     }
 
     _saveOrderMap() {
-        this._settings.set_string('arc-order-map', JSON.stringify(Object.fromEntries(this._orderMap)));
+        // Intentionally does not touch dconf; see the note above.
     }
 
     _mergeApps(sourceAppId, targetAppId) {
@@ -2640,8 +2717,10 @@ class ArcSidebar {
         const CX  = this._cxOffset;
         const sf  = this._scaleFactor;
 
-        const monIdx = Main.layoutManager.monitors.indexOf(mon);
-        const wa = Main.layoutManager.getWorkAreaForMonitor(monIdx >= 0 ? monIdx : 0);
+        // _getMon() returns a fresh object literal, so indexOf() on
+        // layoutManager.monitors never matched and this silently fell back to
+        // monitor 0. The index it already carries is the whole point.
+        const wa = Main.layoutManager.getWorkAreaForMonitor(mon.index ?? 0);
 
         const R_side   = Math.max(Math.round(ARC_MIN_RADIUS * sf), Math.round(wa.height * ARC_RADIUS_RATIO));
         const R_bottom = Math.max(Math.round(ARC_MIN_RADIUS * sf), Math.round(wa.width  * ARC_RADIUS_RATIO));
@@ -2756,13 +2835,10 @@ class ArcSidebar {
                 if (ev.get_button() !== 1) return Clutter.EVENT_PROPAGATE;
                 this._cancelDrag();
                 if (idx > 0) { group.windows.splice(idx, 1); group.windows.unshift(win); }
-                // Clicking a collapsed group fans it out first; a second click
-                // (or clicking a single-window card) activates the window.
-                if (!grid._fanned && group.windowKeys.length > 1) {
-                    this._fanGroup(grid.get_parent());
-                } else {
-                    this._activateGroup(group, win);
-                }
+                // A click always brings the group forward; fanning is what
+                // HOVER is for. Fanning on first click meant clicking a group
+                // only rearranged the sidebar instead of switching to it.
+                this._activateGroup(group, win);
                 return Clutter.EVENT_STOP;
             });
 
@@ -2984,12 +3060,15 @@ class ArcSidebar {
         // window-created, so capture the previous app now and re-check later.
         const prevFocused = global.display.get_focus_window();
         const prevApp = prevFocused ? Shell.WindowTracker.get_default().get_window_app(prevFocused) : null;
-        const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
-            this._untrackTimer(timer);
-            this._handleNewWindow(win, prevApp);
+        this._pendingNewWindows.push({ win, prevApp });
+        this._killNewWindowTimer();
+        this._newWindowTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+            this._untrackTimer(this._newWindowTimer); this._newWindowTimer = null;
+            for (const pending of this._pendingNewWindows.splice(0))
+                this._handleNewWindow(pending.win, pending.prevApp);
             return GLib.SOURCE_REMOVE;
         });
-        this._timers.push(timer);
+        this._timers.push(this._newWindowTimer);
     }
 
     _handleNewWindow(win, prevApp) {
@@ -3039,12 +3118,13 @@ class ArcSidebar {
             this._checkPersistence();
         // After leaving the overview, show only the focused window's group
         // (minimize the rest) instead of revealing every window at once.
-        const timer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
-            this._untrackTimer(timer);
+        this._killOverviewSyncTimer();
+        this._overviewSyncTimer = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
+            this._untrackTimer(this._overviewSyncTimer); this._overviewSyncTimer = null;
             this._syncActiveGroup();
             return GLib.SOURCE_REMOVE;
         });
-        this._timers.push(timer);
+        this._timers.push(this._overviewSyncTimer);
     }
 
     _redraw() {
@@ -3395,6 +3475,7 @@ class ArcSidebar {
             const [px, py, mask] = global.get_pointer();
             if (mask & Clutter.ModifierType.BUTTON1_MASK) return GLib.SOURCE_CONTINUE;
 
+            this._untrackTimer(this._dragPollTimer);
             this._dragPollTimer = null;
             const drag = this._drag;
             this._cancelDrag();

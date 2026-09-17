@@ -8,6 +8,10 @@ export const Meta = {
     WindowType: { NORMAL: 0, DIALOG: 1 },
     SizeChange: { MAXIMIZE: 0, UNMAXIMIZE: 1 },
     KeyBindingFlags: { NONE: 0 },
+    // Real mutter values. Note that meta_window_is_maximized() returns a
+    // gboolean, NOT these flags; the per-axis state is on the
+    // maximized-horizontally / maximized-vertically properties.
+    MaximizeFlags: { HORIZONTAL: 1, VERTICAL: 2, BOTH: 3 },
 };
 
 /**
@@ -95,10 +99,16 @@ export const Clutter = {
     // delta-vs-direction branch in _onScrollEvent() is untested.
     ScrollDirection: { UP: 0, DOWN: 1, LEFT: 2, RIGHT: 3, SMOOTH: 4 },
     PickMode: { REACTIVE: 0, ALL: 1 },
+    // Real Clutter value (1 << 8); the arc drag poll masks against it.
+    ModifierType: { BUTTON1_MASK: 256 },
     PolicyType: { NEVER: 0 },
     EVENT_STOP: true,
     EVENT_PROPAGATE: false,
-    Clone: class Clone extends FakeActor {},
+    Clone: class Clone extends FakeActor {
+        // Real Clutter.Clone exposes set_source(); _nullCloneSources() calls it
+        // when tearing down thumbnails so the clone stops referencing the window.
+        set_source(src) { this.source = src; }
+    },
 };
 
 export const St = {
@@ -200,6 +210,7 @@ export class FakeWindow {
     constructor(appId, {
         minimized = false, type = Meta.WindowType.NORMAL,
         actor = null, frame = { x: 0, y: 0, width: 800, height: 600 },
+        maximizedH = true, maximizedV = true,
     } = {}) {
         this._id = ++winSeq;
         this.appId = appId;
@@ -211,11 +222,19 @@ export class FakeWindow {
         this.activated = 0;
         this._frame = frame;
         this._actor = actor;
+        // Per-axis maximize state, the way mutter exposes it. Both true = a full
+        // maximize; one true = an edge-tiled (half-screen) window.
+        this.maximized_horizontally = maximizedH;
+        this.maximized_vertically = maximizedV;
         /** Signal emissions the compositor would deliver asynchronously. */
         this.pending = [];
     }
 
     get_id() { return this._id; }
+    /** Per-session window counter, NOT stable across logins (see mutter docs). */
+    get_stable_sequence() { return this._id; }
+    /** Mirrors meta_window_is_maximized(): a gboolean, not a flags value. */
+    is_maximized() { return this.maximized_horizontally && this.maximized_vertically; }
     get_window_type() { return this._type; }
     is_attached_dialog() { return false; }
     is_always_on_all_workspaces() { return false; }
@@ -343,7 +362,20 @@ export function setFocus(win) {
 }
 
 /** Full isolation between tests: no leaked handlers, no leaked timers. */
+/** Stage-coordinate pointer position, driven by setPointer() in tests. */
+let pointerPos = [0, 0, 0];
+export function setPointer(x, y, mask = 0) { pointerPos = [x, y, mask]; }
+
+export function setMonitors(mons, primaryIndex = 0) {
+    Main.layoutManager.monitors = mons;
+    Main.layoutManager.primaryIndex = primaryIndex;
+}
+
 export function resetHarness() {
+    pointerPos = [0, 0, 0];
+    Main.layoutManager.monitors = [{ x: 0, y: 0, width: 1920, height: 1080, index: 0 }];
+    Main.layoutManager.primaryIndex = 0;
+    Main.layoutManager.lastWorkAreaIndex = null;
     windowManager.clear();
     display.clear();
     wsmEmitter.clear();
@@ -376,12 +408,19 @@ export const Shell = {
 export const Main = {
     panel: { height: 32 },
     layoutManager: {
-        primaryMonitor: { x: 0, y: 0, width: 1920, height: 1080, index: 0 },
-        get monitors() { return [Main.layoutManager.primaryMonitor]; },
-        getWorkAreaForMonitor(_idx) {
-            const mon = Main.layoutManager.primaryMonitor;
+        // Single 1080p monitor by default; setMonitors() swaps in a multi-head
+        // arrangement so index-handling bugs can't hide behind "index 0 is the
+        // only index there is".
+        monitors: [{ x: 0, y: 0, width: 1920, height: 1080, index: 0 }],
+        primaryIndex: 0,
+        get primaryMonitor() { return Main.layoutManager.monitors[Main.layoutManager.primaryIndex] ?? null; },
+        /** Records the index it was asked about, so tests can assert on it. */
+        getWorkAreaForMonitor(idx) {
+            Main.layoutManager.lastWorkAreaIndex = idx;
+            const mon = Main.layoutManager.monitors[idx] ?? Main.layoutManager.monitors[0];
             return { x: mon.x, y: mon.y + Main.panel.height, width: mon.width, height: mon.height - Main.panel.height };
         },
+        lastWorkAreaIndex: null,
         addChrome: () => {},
         removeChrome: () => {},
         connect: () => 1,
@@ -391,6 +430,12 @@ export const Main = {
     },
     wm: { addKeybinding: () => 1, removeKeybinding: () => {} },
     uiGroup: new FakeActor(),
+    // ArcSidebar tracks overview show/hide so it can re-show only the focused
+    // window's group on the way out.
+    overview: {
+        connectObject: () => {},
+        disconnectObject: () => {},
+    },
 };
 
 export class Extension {
@@ -426,6 +471,7 @@ const DEFAULTS = {
     'show-workspace-current': true,
     'show-on-empty-workspace': true,
     'toggle-sidebar': [],
+    'keybinding-show-desktop': [],
     'arc-angle-step': 16,
     'sidebar-layout': 'stack',
     'app-merge-map': '{}',
@@ -440,6 +486,14 @@ const DEFAULTS = {
     'keybinding-arc-prev': [],
     'keybinding-arc-activate': [],
     'keybinding-arc-close': [],
+    // Added by the Tahoe PR; values mirror the gschema defaults.
+    'arc-hover-fan-delay': 350,
+    'arc-fan-hold': true,
+    'arc-fan-hold-delay': 800,
+    'arc-hide-active': false,
+    'arc-keep-visible': true,
+    'arc-show-in-overview': true,
+    'arc-overview-merge': true,
 };
 
 export function makeSettings(overrides = {}) {
@@ -495,7 +549,7 @@ export function installGlobals() {
             // no real geometry in this fake, so it can't hit-test from x/y.
             get_actor_at_pos: () => stage._actorAtPos ?? null,
         }),
-        get_pointer: () => [0, 0],
+        get_pointer: () => pointerPos,
         get_current_time: () => ++winSeq,
     };
 }

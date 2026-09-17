@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import {
     Meta, St, Clutter, clock, wsm, windowManager,
     FakeWindow, makeWindowActor, makeSettings, installGlobals, deliver, resetHarness,
-    setFocus, Main, stage,
+    setFocus, Main, stage, setPointer, setMonitors,
 } from './stubs.mjs';
 
 installGlobals();
@@ -35,6 +35,9 @@ function makeSidebar(settings) {
     s._visible = false;
     return s;
 }
+
+/** The group key ArcSidebar derives for a window (see _windowKey). */
+function arc0WindowKey(win) { return `w${win.get_stable_sequence()}`; }
 
 /** What the 'active-workspace-changed' handler in _wire() does. */
 function switchWorkspace(sidebar, ws) {
@@ -1044,6 +1047,99 @@ test('#8 unmaximize still returns the window when the feature is toggled off mid
     } finally { mtw.disable(); }
 });
 
+test('#8 an edge-tiled (single-axis) window is left where it is', () => {
+    const [ws0, ws1] = wsm.reset(2);
+    // Snapped to the left half: horizontally NOT maximized, vertically yes.
+    const a = new FakeWindow('appA', { maximizedH: false, maximizedV: true });
+    const sibling = new FakeWindow('appS');
+    ws1.adopt(a); ws1.adopt(sibling);
+    wsm.setActive(ws1);
+
+    const mtw = new MaximizeToWorkspace(makeSettings());
+    mtw.enable();
+    try {
+        windowManager.emit('size-change', { meta_window: a }, Meta.SizeChange.MAXIMIZE);
+        clock.advance(100);
+        assert.equal(a.get_workspace()?.label, ws1.label,
+            'tiling a window to half the screen must not move it to another workspace');
+        assert.notEqual(a.get_workspace(), ws0);
+    } finally { mtw.disable(); }
+});
+
+test('#8 a full maximize still moves, so the tiling guard is not just always-false', () => {
+    const [ws0, ws1] = wsm.reset(2);
+    const a = new FakeWindow('appA', { maximizedH: true, maximizedV: true });
+    const sibling = new FakeWindow('appS');
+    ws1.adopt(a); ws1.adopt(sibling);
+    wsm.setActive(ws1);
+
+    const mtw = new MaximizeToWorkspace(makeSettings());
+    mtw.enable();
+    try {
+        windowManager.emit('size-change', { meta_window: a }, Meta.SizeChange.MAXIMIZE);
+        clock.advance(100);
+        assert.equal(a.get_workspace(), ws0, 'a full maximize must still move the window');
+    } finally { mtw.disable(); }
+});
+
+/* ═══ a rebuild must not strand the sidebar open ════════════════════ */
+
+/** A sidebar with a REAL _refresh(), unlike makeSidebar()'s no-op stub. */
+function realSidebar(settings) {
+    const s = new StageSidebar(settings);
+    s._build();
+    s._visible = true;
+    return s;
+}
+
+test('a refresh with the pointer away from the panel re-arms the hide timer', () => {
+    wsm.reset(1);
+    const sidebar = realSidebar(makeSettings({
+        'sidebar-auto-hide': true,
+        'show-on-empty-workspace': false,
+    }));
+    try {
+        // Pointer far away from the 220px-wide left panel.
+        setPointer(1500, 500);
+        sidebar._hovered = true;          // as if a card had been hovered
+        sidebar._refresh();
+
+        assert.equal(sidebar._hovered, false,
+            'hover must be re-derived from the pointer, not left true');
+        assert.ok(sidebar._hideTimer,
+            'a rebuild with the pointer away left nothing to hide the sidebar');
+    } finally { sidebar.disable(); }
+});
+
+test('a refresh with the pointer still over the panel keeps it open', () => {
+    wsm.reset(1);
+    const sidebar = realSidebar(makeSettings({
+        'sidebar-auto-hide': true,
+        'show-on-empty-workspace': false,
+    }));
+    try {
+        setPointer(40, 400);   // inside the default 220px left panel
+        sidebar._refresh();
+
+        assert.equal(sidebar._hovered, true,
+            'pointer is over the panel, so hover must stay true');
+        assert.equal(sidebar._hideTimer, null,
+            'must not schedule a hide while the pointer is on the panel');
+    } finally { sidebar.disable(); }
+});
+
+test('_pointerOverPanel uses the settled position, not the mid-slide one', () => {
+    wsm.reset(1);
+    const sidebar = realSidebar(makeSettings());
+    try {
+        // Panel parked off screen, as it is at the start of a reveal.
+        sidebar._panel.set_position(-220, 32);
+        setPointer(40, 400);
+        assert.ok(sidebar._pointerOverPanel(),
+            'a check made mid-slide must use where the panel is going, not where it is');
+    } finally { sidebar.disable(); }
+});
+
 /* ═══ #9: disable() tears down every actor and signal source ════════ */
 
 test('#9 disable() destroys every actor and disconnects every signal source', () => {
@@ -1606,7 +1702,7 @@ test('_computeGeo radius scales normally on a tall workarea (no floor triggered)
 
 /* ═══ ArcSidebar: data model: _buildGroups(), merge/order persistence ═ */
 
-test('_buildGroups groups windows by app, one group per app with no merge', () => {
+test('_buildGroups gives every window its own group when nothing is merged', () => {
     const [ws0] = wsm.reset(1);
     wsm.setActive(ws0);
     const a = new FakeWindow('appA'); ws0.adopt(a);
@@ -1615,21 +1711,40 @@ test('_buildGroups groups windows by app, one group per app with no merge', () =
     arc._loadMergeMap(); arc._loadOrderMap();
     arc._buildGroups();
     assert.equal(arc._groups.length, 2);
-    assert.deepEqual(arc._groups.map(g => g.key).sort(), ['appA', 'appB']);
+    // Groups are keyed per WINDOW now, not per app, which is what makes
+    // grouping two windows of the same app possible.
+    assert.deepEqual(arc._groups.map(g => g.windowKeys.length), [1, 1]);
+    assert.equal(new Set(arc._groups.map(g => g.key)).size, 2, 'keys must be distinct');
 });
 
-test('_buildGroups folds merged apps into one group with both windows', () => {
+test('_buildGroups folds merged windows into one group carrying both', () => {
     const [ws0] = wsm.reset(1);
     wsm.setActive(ws0);
     const a = new FakeWindow('appA'); ws0.adopt(a);
     const b = new FakeWindow('appB'); ws0.adopt(b);
-    const settings = makeSettings({ 'arc-merge-map': JSON.stringify({ appA: 'appA|appB', appB: 'appA|appB' }) });
-    const arc = new ArcSidebar(settings);
+    const arc = new ArcSidebar(makeSettings());
     arc._loadMergeMap(); arc._loadOrderMap();
     arc._buildGroups();
+
+    arc._mergeApps(arc._groups[1].windowKeys[0], arc._groups[0].windowKeys[0]);
+    arc._buildGroups();
+
     assert.equal(arc._groups.length, 1);
-    assert.equal(arc._groups[0].appIds.length, 2);
+    assert.equal(arc._groups[0].windowKeys.length, 2);
     assert.equal(arc._groups[0].windows.length, 2);
+});
+
+test('_buildGroups can group two windows of the SAME app, which app keys could not', () => {
+    const [ws0] = wsm.reset(1);
+    wsm.setActive(ws0);
+    const a1 = new FakeWindow('appA'); ws0.adopt(a1);
+    const a2 = new FakeWindow('appA'); ws0.adopt(a2);
+    const b = new FakeWindow('appB'); ws0.adopt(b);
+    const arc = new ArcSidebar(makeSettings());
+    arc._loadMergeMap(); arc._loadOrderMap();
+    arc._buildGroups();
+    assert.equal(arc._groups.length, 3,
+        'two windows of one app must start as two separate groups');
 });
 
 test('_buildGroups sorts by order-map, unordered groups go last', () => {
@@ -1638,11 +1753,18 @@ test('_buildGroups sorts by order-map, unordered groups go last', () => {
     const a = new FakeWindow('appA'); ws0.adopt(a);
     const b = new FakeWindow('appB'); ws0.adopt(b);
     const c = new FakeWindow('appC'); ws0.adopt(c);
-    const settings = makeSettings({ 'arc-order-map': JSON.stringify({ appB: 0, appA: 1 }) });
-    const arc = new ArcSidebar(settings);
+    const arc = new ArcSidebar(makeSettings());
     arc._loadMergeMap(); arc._loadOrderMap();
     arc._buildGroups();
-    assert.deepEqual(arc._groups.map(g => g.key), ['appB', 'appA', 'appC']);
+
+    // Order is stored per group key, which is a window key now.
+    const [k0, k1] = arc._groups.map(g => g.key);
+    arc._orderMap.set(k1, 0);
+    arc._orderMap.set(k0, 1);
+    arc._buildGroups();
+
+    assert.deepEqual(arc._groups.slice(0, 2).map(g => g.key), [k1, k0],
+        'explicitly ordered groups come first, in their stored order');
 });
 
 test('_buildGroups promotes the focused window to the front of its group', () => {
@@ -1650,10 +1772,14 @@ test('_buildGroups promotes the focused window to the front of its group', () =>
     wsm.setActive(ws0);
     const a1 = new FakeWindow('appA'); ws0.adopt(a1);
     const a2 = new FakeWindow('appA'); ws0.adopt(a2);
-    setFocus(a2);
     const arc = new ArcSidebar(makeSettings());
     arc._loadMergeMap(); arc._loadOrderMap();
     arc._buildGroups();
+    // Put both in one group, then focus the second.
+    arc._mergeApps(arc._groups[1].windowKeys[0], arc._groups[0].windowKeys[0]);
+    setFocus(a2);
+    arc._buildGroups();
+
     assert.equal(arc._groups[0].windows[0], a2, 'focused window should be first');
 });
 
@@ -1675,7 +1801,7 @@ test('_mergeApps folds source into target and every member shares the new compos
     arc._loadMergeMap();
     arc._mergeApps('appA', 'appB');
     assert.equal(arc._mergeMap.get('appA'), arc._mergeMap.get('appB'));
-    assert.equal(JSON.parse(settings.get_string('arc-merge-map'))['appA'], arc._mergeMap.get('appA'));
+    assert.ok(arc._mergeMap.get('appA'), 'both members must share a composite key');
 });
 
 test('_mergeApps keeps one segment per app across repeated merges', () => {
@@ -1705,36 +1831,37 @@ test('_mergeApps key length stays bounded, not doubling per merge', () => {
         `expected 9 segments (root + 8), got ${key.split('|').length}; key is compounding`);
 });
 
-test('_loadMergeMap repairs an already-corrupted key from an earlier version', () => {
-    // What v2.0.4 wrote: the composite key folded back into itself repeatedly.
-    const corrupt = JSON.stringify({
-        appA: 'appA|appA|appB|appB|appC',
-        appB: 'appA|appA|appB|appB|appC',
-        appC: 'appA|appA|appB|appB|appC',
-    });
-    const arc = new ArcSidebar(makeSettings({ 'arc-merge-map': corrupt }));
+test('_loadMergeMap ignores whatever dconf holds, so stale keys cannot resurface', () => {
+    // Group keys are per-session window numbers; reusing a stored map after a
+    // login silently grouped unrelated windows that inherited those numbers.
+    const stale = JSON.stringify({ w1: 'w1|w2', w2: 'w1|w2' });
+    const arc = new ArcSidebar(makeSettings({ 'arc-merge-map': stale }));
     arc._loadMergeMap();
-    const key = arc._mergeMap.get('appA');
-    assert.equal(key, 'appA|appB|appC', `stale duplicate segments were not collapsed: ${key}`);
-    ['appA', 'appB', 'appC'].forEach(a => assert.equal(arc._mergeMap.get(a), key));
+    assert.equal(arc._mergeMap.size, 0,
+        'a persisted merge map must not be read back into a new session');
 });
 
-test('_loadMergeMap drops phantom entries keyed by a composite group key', () => {
-    // The old bug also wrote entries whose "app id" was itself a group key,
-    // which inflated member counts so _unmergeApp could never clean up.
-    const corrupt = JSON.stringify({
-        appA: 'appA|appB',
-        appB: 'appA|appB',
-        'appA|appB': 'appA|appB',       // phantom: no app can have this id
-        'appA|appA|appB': 'appA|appB',  // phantom
-    });
-    const arc = new ArcSidebar(makeSettings({ 'arc-merge-map': corrupt }));
-    arc._loadMergeMap();
+test('_loadOrderMap ignores dconf too, since it is keyed the same way', () => {
+    const stale = JSON.stringify({ w1: 0, w2: 1 });
+    const arc = new ArcSidebar(makeSettings({ 'arc-order-map': stale }));
+    arc._loadOrderMap();
+    assert.equal(arc._orderMap.size, 0);
+});
 
-    assert.equal(arc._mergeMap.size, 2, 'phantom composite-id entries should be dropped');
-    [...arc._mergeMap.keys()].forEach(k =>
-        assert.ok(!k.includes('|'), `phantom entry survived: ${k}`));
-    assert.equal(arc._mergeMap.get('appA'), 'appA|appB');
+test('merging never writes either map back to dconf', () => {
+    const settings = makeSettings();
+    const written = [];
+    const realSet = settings.set_string;
+    settings.set_string = (k, v) => { written.push(k); return realSet?.call(settings, k, v); };
+
+    const arc = new ArcSidebar(settings);
+    arc._loadMergeMap(); arc._loadOrderMap();
+    arc._mergeApps('w2', 'w1');
+    arc._orderMap.set('w1', 0);
+    arc._saveOrderMap();
+
+    assert.deepEqual(written.filter(k => k.startsWith('arc-')), [],
+        `session-only maps must not touch dconf, but wrote: ${written.join(', ')}`);
 });
 
 test('_unmergeApp removes the app and cleans up now-singleton groups', () => {
@@ -1892,7 +2019,11 @@ test('dragging past the threshold and releasing outside the panel merges into th
     const focused = new FakeWindow('appFocused'); ws0.adopt(focused);
     setFocus(focused);
     const sourceApp = { get_id: () => 'appSource', create_icon_texture: () => new St.Widget({}) };
-    const group = { app: sourceApp, apps: [sourceApp], windows: [source], appIds: ['appSource'], key: 'appSource' };
+    const srcKey = arc0WindowKey(source);
+    const group = {
+        app: sourceApp, apps: [sourceApp], windows: [source],
+        appIds: ['appSource'], windowKeys: [srcKey], key: srcKey,
+    };
     const arc = new ArcSidebar(makeSettings());
     arc._scaleFactor = 1;
     arc._geo = { visX: 0, visY: 0, panelW: 200, panelH: 800 };
@@ -1908,8 +2039,9 @@ test('dragging past the threshold and releasing outside the panel merges into th
     try {
         arc._onCardRelease(container, group, 0, { get_button: () => 1 });
     } finally { global.get_pointer = origGetPointer; }
-    assert.ok(arc._mergeMap.get('appSource'), 'expected a merge-map entry for the dragged app');
-    assert.equal(arc._mergeMap.get('appSource'), arc._mergeMap.get('appFocused'));
+    const focusedKey = arc0WindowKey(focused);
+    assert.ok(arc._mergeMap.get(srcKey), 'expected a merge-map entry for the dragged window');
+    assert.equal(arc._mergeMap.get(srcKey), arc._mergeMap.get(focusedKey));
     assert.equal(arc._drag, null);
 });
 
@@ -1945,8 +2077,11 @@ test('right-click on a merged (multi-app) card un-merges every member app', () =
     const settings = makeSettings();
     const arc = new ArcSidebar(settings);
     arc._loadMergeMap();
-    arc._mergeApps('appA', 'appB');
-    const group = { apps: [{ get_id: () => 'appA' }, { get_id: () => 'appB' }], appIds: ['appA', 'appB'] };
+    arc._mergeApps('w1', 'w2');
+    const group = {
+        apps: [{ get_id: () => 'appA' }, { get_id: () => 'appB' }],
+        appIds: ['appA', 'appB'], windowKeys: ['w1', 'w2'],
+    };
     const container = new St.Widget({});
     const stop = arc._onCardPress(container, group, { get_button: () => 3 });
     assert.equal(stop, Clutter.EVENT_STOP);
@@ -1955,7 +2090,7 @@ test('right-click on a merged (multi-app) card un-merges every member app', () =
 
 test('right-click on a single-app card is not consumed (propagates for a normal click)', () => {
     const arc = new ArcSidebar(makeSettings());
-    const group = { apps: [{ get_id: () => 'appA' }], appIds: ['appA'] };
+    const group = { apps: [{ get_id: () => 'appA' }], appIds: ['appA'], windowKeys: ['w1'] };
     const container = new St.Widget({});
     const result = arc._onCardPress(container, group, { get_button: () => 3 });
     assert.equal(result, Clutter.EVENT_PROPAGATE);
@@ -2111,6 +2246,188 @@ test('_panel is not clip_to_allocation; cards beyond relIdx=1 legitimately exten
     assert.equal(arc._panel.clip_to_allocation, false,
         'clipping the panel to a one-card-wide box hides cards the angle cull already decided to show');
     arc._destroyUI();
+});
+
+/* ═══ an explicit reveal must not hide itself straight away ═════════ */
+
+test('the keyboard toggle does not auto-hide while the pointer is elsewhere', () => {
+    wsm.reset(1);
+    const sidebar = new StageSidebar(makeSettings({
+        'sidebar-auto-hide': true,
+        'show-on-empty-workspace': false,
+    }));
+    sidebar._build();
+    try {
+        setPointer(1500, 500);   // nowhere near the sidebar
+        sidebar._toggleVisible();
+
+        assert.equal(sidebar._visible, true, 'the toggle must reveal the sidebar');
+        assert.equal(sidebar._hideTimer, null,
+            'an explicit reveal that hides itself 800ms later makes the shortcut useless');
+    } finally { sidebar.disable(); }
+});
+
+/* ═══ Stack: dragging to merge must show something ══════════════════ */
+
+test('dragging a Stack card past the threshold raises a ghost that follows the pointer', () => {
+    const [ws0] = wsm.reset(1);
+    wsm.setActive(ws0);
+    const a = new FakeWindow('appA', { actor: makeWindowActor(800, 600) }); ws0.adopt(a);
+
+    const sidebar = new StageSidebar(makeSettings({ 'sidebar-mode': 'apps' }));
+    sidebar._build();
+    try {
+        const group = { key: 'appA', app: null, apps: [], windows: [a] };
+        sidebar._startAppDragCandidate(group, null);
+        assert.equal(sidebar._appDragGhost, null, 'no ghost before the threshold');
+
+        // A nudge below the threshold must still show nothing.
+        sidebar._onAppDragMotion({ get_coords: () => [3, 3] });
+        assert.equal(sidebar._appDragGhost, null, 'a 3px nudge is a click, not a drag');
+
+        sidebar._onAppDragMotion({ get_coords: () => [400, 300] });
+        assert.ok(sidebar._appDragGhost, 'past the threshold the drag must show a ghost');
+        const [gx, gy] = sidebar._appDragGhost.get_position();
+        assert.ok(gx < 400 && gy < 300, 'the ghost should be centred on the pointer');
+
+        sidebar._onAppDragMotion({ get_coords: () => [600, 500] });
+        const [gx2] = sidebar._appDragGhost.get_position();
+        assert.ok(gx2 > gx, 'the ghost must track further pointer motion');
+
+        sidebar._cancelAppDrag();
+        assert.equal(sidebar._appDragGhost, null, 'the ghost must go with the drag');
+    } finally { sidebar.disable(); }
+});
+
+test('disable() destroys a drag ghost left in flight', () => {
+    const [ws0] = wsm.reset(1);
+    wsm.setActive(ws0);
+    const a = new FakeWindow('appA', { actor: makeWindowActor(800, 600) }); ws0.adopt(a);
+
+    const sidebar = new StageSidebar(makeSettings({ 'sidebar-mode': 'apps' }));
+    sidebar._build();
+    sidebar._startAppDragCandidate({ key: 'appA', apps: [], windows: [a] }, null);
+    sidebar._onAppDragMotion({ get_coords: () => [400, 300] });
+    const ghost = sidebar._appDragGhost;
+    assert.ok(ghost, 'precondition: a ghost is in flight');
+
+    sidebar.disable();
+    assert.ok(ghost.destroyed, 'disable() must not leak the ghost actor');
+    assert.equal(sidebar._appDragGhost, null);
+});
+
+/* ═══ Arc: a click switches to the group, hover is what fans it ═════ */
+
+function arcWithGroups(settings) {
+    const arc = new ArcSidebar(settings ?? makeSettings());
+    arc._scaleFactor = 1;
+    arc._monitor = arc._pickMonitor();
+    arc._loadMergeMap(); arc._loadOrderMap(); arc._loadConfig();
+    arc._buildUI();
+    return arc;
+}
+
+test('clicking a multi-window group activates it instead of fanning it open', () => {
+    const [ws0] = wsm.reset(1);
+    wsm.setActive(ws0);
+    const a = new FakeWindow('appA'); ws0.adopt(a);
+    const b = new FakeWindow('appB'); ws0.adopt(b);
+
+    const arc = arcWithGroups();
+    try {
+        arc._buildGroups();
+        // Put both windows in one group so the old code would have fanned.
+        arc._mergeApps(arc._groups[1].windowKeys[0], arc._groups[0].windowKeys[0]);
+        arc._buildGroups();
+        assert.equal(arc._groups.length, 1, 'precondition: one merged group');
+        assert.ok(arc._groups[0].windowKeys.length > 1, 'precondition: multi-window');
+
+        let activated = 0, fanned = 0;
+        arc._activateGroup = () => { activated++; };
+        arc._fanGroup = () => { fanned++; };
+        arc._redraw();
+
+        const grid = arc._containers[0]._grid;
+        grid._fanned = false;
+        grid._cards[0].card.emit('button-release-event', { get_button: () => 1 });
+
+        assert.equal(activated, 1, 'a click must bring the group forward');
+        assert.equal(fanned, 0, 'a click must not merely fan the group in the sidebar');
+    } finally { arc.disable(); }
+});
+
+test('hover fan-out is on by default, so a group can still be peeked into', () => {
+    const arc = new ArcSidebar(makeSettings());
+    arc._scaleFactor = 1;
+    arc._monitor = arc._pickMonitor();
+    arc._loadMergeMap(); arc._loadOrderMap(); arc._loadConfig();
+    assert.ok(arc._fanDelay > 0,
+        'with click-to-fan removed, a 0 hover delay would leave no way to fan at all');
+});
+
+/* ═══ the drag-poll safety net must not leave a dead id behind ══════ */
+
+test('resolving a drag through the poll timer untracks its id', () => {
+    wsm.reset(1);
+    const arc = new ArcSidebar(makeSettings());
+    arc._scaleFactor = 1;
+    arc._monitor = arc._pickMonitor();
+    arc._loadMergeMap(); arc._loadOrderMap(); arc._loadConfig();
+    arc._activateGroup = () => {};
+    arc._commitDrag = () => {};
+
+    arc._drag = { group: { windowKeys: ['w1'] }, startX: 0, startY: 0, moved: false };
+    arc._armDragPollTimer();
+    const id = arc._dragPollTimer;
+    assert.ok(arc._timers.includes(id), 'precondition: the poll id is tracked');
+
+    // Button already released (the stub pointer reports no buttons held), so
+    // the timer takes the resolve-and-stop branch.
+    clock.advance(60);
+
+    assert.equal(arc._dragPollTimer, null, 'the field must be cleared');
+    assert.ok(!arc._timers.includes(id),
+        'a resolved poll timer left its dead id in _timers; disable() would ' +
+        'then source_remove a stale (possibly recycled) id');
+    arc.disable();
+});
+
+/* ═══ every user-visible Stack setting refreshes live ═══════════════ */
+
+test('toggling show-workspace-current refreshes the sidebar', () => {
+    wsm.reset(1);
+    const settings = makeSettings({ 'sidebar-mode': 'workspaces' });
+    const sidebar = makeSidebar(settings);
+    sidebar._build();
+    sidebar._wire();
+    sidebar._visible = true;
+    const before = sidebar._refreshCount ?? 0;
+
+    settings.set('show-workspace-current', false);
+
+    assert.ok((sidebar._refreshCount ?? 0) > before,
+        'the setting is cached in _renderSignature(), so it needs a changed:: handler');
+    sidebar.disable();
+});
+
+/* ═══ ArcSidebar: geometry must follow the PRIMARY monitor ══════════ */
+
+test('arc reads the work area of the primary monitor, not always monitor 0', () => {
+    wsm.reset(1);
+    // Two heads, primary is the SECOND one and a different size, so using the
+    // wrong index produces visibly wrong geometry rather than the same numbers.
+    setMonitors([
+        { x: 0,    y: 0, width: 1280, height: 720,  index: 0 },
+        { x: 1280, y: 0, width: 1920, height: 1080, index: 1 },
+    ], 1);
+
+    const arc = new ArcSidebar(makeSettings());
+    arc._scaleFactor = 1;
+    arc._monitor = arc._pickMonitor();
+    arc._loadMergeMap(); arc._loadOrderMap(); arc._loadConfig();
+
+    assert.equal(Main.layoutManager.lastWorkAreaIndex, 1,
+        'arc asked for the work area of monitor 0 while sitting on monitor 1');
 });
 
 /* ═══ ArcSidebar: the same edge dwell as the stack layout (#2) ════════ */

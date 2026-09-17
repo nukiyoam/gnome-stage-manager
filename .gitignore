@@ -10,3 +10,4 @@ tests/ext-under-test.mjs
 ref/
 .superpowers/
 .venv/
+docs/

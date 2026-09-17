@@ -204,3 +204,16 @@ StScrollBar StButton#vhandle:hover {
 .stage-overflow.light {
     color: rgba(20, 20, 25, 0.55);
 }
+
+/* Drag ghost: the thumbnail that follows the pointer while merging cards. */
+
+.stage-drag-ghost {
+    border-radius: 14px;
+    background-color: rgba(28, 28, 34, 0.88);
+    border: 2px solid rgba(255, 255, 255, 0.28);
+}
+
+.stage-drag-ghost.light {
+    background-color: rgba(255, 255, 255, 0.88);
+    border: 2px solid rgba(0, 0, 0, 0.22);
+}
