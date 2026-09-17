@@ -6,6 +6,7 @@ import Adw from 'gi://Adw';
 import Gdk from 'gi://Gdk';
 import Gio from 'gi://Gio';
 import GLib from 'gi://GLib';
+import GObject from 'gi://GObject';
 import Gtk from 'gi://Gtk';
 
 import { ExtensionPreferences, gettext as _ } from 'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
@@ -16,14 +17,14 @@ export default class StageManagerPreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
 
-        // Behavior Page
+        // ── Behavior Page ──
         const behaviorPage = new Adw.PreferencesPage({
             title: _('Behavior'),
             icon_name: 'preferences-system-symbolic',
         });
         window.add(behaviorPage);
 
-        // Sidebar Layout: the single biggest choice in this page, so it gets
+        // Sidebar Layout — the single biggest choice in this page, so it gets
         // its own segmented switch at the very top rather than a dropdown
         // buried inside a settings group.
         const layoutGroup = new Adw.PreferencesGroup({
@@ -97,7 +98,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         behaviorPage.add(sideGroup);
 
         // Arc always auto-hides (hover-only, no "always visible" mode) and
-        // never reserves struts, so both rows are Stack-only.
+        // never reserves struts — both rows are Stack-only.
         const autoHideSwitch = new Adw.SwitchRow({
             title: _('Auto-hide Sidebar'),
             subtitle: _('Off = always visible (macOS default). On = hover to reveal.'),
@@ -114,7 +115,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         sideGroup.add(reserveSwitch);
         this._bindLayoutSensitivity(reserveSwitch, settings, 'stack');
 
-        // Sidebar Content: what the Stack layout's cards show. Arc has no
+        // Sidebar Content — what the Stack layout's cards show. Arc has no
         // equivalent (it always groups by app, one icon per stacked window), so
         // the whole group is hidden rather than shown inert while layout is arc.
         const contentGroup = new Adw.PreferencesGroup({
@@ -188,13 +189,16 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         // Shortcuts
         const shortcutGroup = new Adw.PreferencesGroup({
             title: _('Shortcuts'),
-            description: _('No shortcut is set by default. Click Set to choose one, and it takes effect immediately with no restart needed.'),
+            description: _('No shortcut is set by default. Click Set to choose one — it takes effect immediately, no restart needed.'),
         });
         behaviorPage.add(shortcutGroup);
 
         this._addShortcutRow(shortcutGroup, settings, 'toggle-sidebar',
             _('Toggle Sidebar'),
             _('Reveal or hide the sidebar without moving the mouse to the screen edge'));
+        this._addShortcutRow(shortcutGroup, settings, 'keybinding-show-desktop',
+            _('Show Desktop'),
+            _('Reveal the wallpaper by parking the current stage or minimizing every window'));
         this._addShortcutRow(shortcutGroup, settings, 'keybinding-arc-next',
             _('Arc: Next Card'), _('Move the arc carousel to the next card'));
         this._addShortcutRow(shortcutGroup, settings, 'keybinding-arc-prev',
@@ -204,7 +208,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         this._addShortcutRow(shortcutGroup, settings, 'keybinding-arc-close',
             _('Arc: Close Front Window'), _('Close the front window of the arc carousel\'s front card'));
 
-        // Appearance Page
+        // ── Appearance Page ──
         const lookPage = new Adw.PreferencesPage({
             title: _('Appearance'),
             icon_name: 'applications-graphics-symbolic',
@@ -223,7 +227,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
             _('Pointer must rest on the edge this long before the sidebar opens (ms, 0 = instant)'),
             0, 1000, 50);
 
-        // Stack Layout: position only applies to the Stack layout; the card
+        // Stack Layout — position only applies to the Stack layout; the card
         // list itself stays a vertical column either way (see CLAUDE.md on
         // why Bottom isn't offered here yet).
         const stackGroup = new Adw.PreferencesGroup({
@@ -252,7 +256,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         stackPosRow.add_suffix(stackPosDropdown);
         stackGroup.add(stackPosRow);
 
-        // Arc Layout: settings specific to the 'arc' sidebar-layout carousel.
+        // Arc Layout — settings specific to the 'arc' sidebar-layout carousel.
         const arcGroup = new Adw.PreferencesGroup({
             title: _('Arc Layout'),
             description: _('Arc layout only'),
@@ -292,8 +296,49 @@ export default class StageManagerPreferences extends ExtensionPreferences {
             _('Arc Card Scale'), _('Card size percentage (50-150)'), 50, 150, 5);
         this._addSpinRow(arcGroup, settings, 'arc-scroll-speed',
             _('Arc Scroll Speed'), _('Momentum-scroll speed (1-20)'), 1, 20, 1);
+        this._addSpinRow(arcGroup, settings, 'arc-hover-fan-delay',
+            _('Hover Fan Delay'), _('Milliseconds to hover a group before it fans out (0 = never, fan only on click or scroll)'), 0, 3000, 50);
 
-        // Card scale/perspective are the Stack layout's own 3D card effect,
+        const fanHoldSwitch = new Adw.SwitchRow({
+            title: _('Hold Expanded Group'),
+            subtitle: _('Keep a group expanded briefly after the pointer leaves it'),
+        });
+        settings.bind('arc-fan-hold', fanHoldSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        arcGroup.add(fanHoldSwitch);
+
+        const fanHoldRow = this._addSpinRow(arcGroup, settings, 'arc-fan-hold-delay',
+            _('Expanded Group Hold Delay'), _('Milliseconds to keep a group expanded after leaving (0 = instant)'), 0, 5000, 50);
+        fanHoldSwitch.bind_property('active', fanHoldRow, 'sensitive', GObject.BindingFlags.SYNC_CREATE);
+
+        const hideActiveSwitch = new Adw.SwitchRow({
+            title: _('Hide Active Card'),
+            subtitle: _('Hide the card or group that contains the focused window'),
+        });
+        settings.bind('arc-hide-active', hideActiveSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        arcGroup.add(hideActiveSwitch);
+
+        const keepVisibleSwitch = new Adw.SwitchRow({
+            title: _('Keep Windows Visible'),
+            subtitle: _('Keep previous windows visible when a new window opens. When off, opening a window minimizes the others so only the newest shows.'),
+        });
+        settings.bind('arc-keep-visible', keepVisibleSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        arcGroup.add(keepVisibleSwitch);
+
+        const showInOverviewSwitch = new Adw.SwitchRow({
+            title: _('Show in Overview'),
+            subtitle: _('Show the sidebar while the GNOME overview is active'),
+        });
+        settings.bind('arc-show-in-overview', showInOverviewSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        arcGroup.add(showInOverviewSwitch);
+
+        const overviewMergeSwitch = new Adw.SwitchRow({
+            title: _('Merge Apps Opened From Overview'),
+            subtitle: _('Join a new app opened from the overview to the active card/group (if any)'),
+        });
+        settings.bind('arc-overview-merge', overviewMergeSwitch, 'active', Gio.SettingsBindFlags.DEFAULT);
+        arcGroup.add(overviewMergeSwitch);
+
+        // Card scale/perspective are the Stack layout's own 3D card effect —
         // Arc has its own separate 'arc-card-scale' above and no perspective tilt.
         const cardGroup = new Adw.PreferencesGroup({ title: _('Cards'), description: _('Stack layout only') });
         lookPage.add(cardGroup);
@@ -309,14 +354,14 @@ export default class StageManagerPreferences extends ExtensionPreferences {
 
         // Slide duration is the Stack panel's own show/hide animation; Arc's
         // card motions use their own fixed durations. Hide Delay (below) is
-        // shared: both layouts read auto-hide-delay.
+        // shared — both layouts read auto-hide-delay.
         const animDurationRow = this._addSpinRow(animGroup, settings, 'animation-duration',
             _('Animation Duration'), _('Slide speed in milliseconds'), 0, 1000, 25);
         this._bindLayoutSensitivity(animDurationRow, settings, 'stack');
         this._addSpinRow(animGroup, settings, 'auto-hide-delay',
             _('Hide Delay'), _('Delay before hiding after mouse leaves (ms)'), 100, 5000, 100);
 
-        // About & Logs Page
+        // ── About & Logs Page ──
         const aboutPage = new Adw.PreferencesPage({
             title: _('About'),
             icon_name: 'dialog-information-symbolic',
@@ -344,7 +389,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         });
         infoGroup.add(sessionRow);
 
-        // Project links: the repo URL comes from metadata.json so it stays in
+        // Project links — the repo URL comes from metadata.json so it stays in
         // step with what EGO shows on the extension's page.
         const repoUrl = this.metadata.url || 'https://github.com/itsdigvijaysing/gnome-stage-manager';
         const linkGroup = new Adw.PreferencesGroup({
@@ -395,7 +440,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         logRow.set_child(scrollWin);
         logGroup.add(logRow);
 
-        // Not loaded on open, since spawning `journalctl` unprompted is an EGO reviewer objection.
+        // Not loaded on open — spawning `journalctl` unprompted is an EGO reviewer objection.
         logView.get_buffer().set_text(
             _('Press Refresh to load recent log messages.'), -1);
 
@@ -436,7 +481,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
             if (showing) this._loadLogs(logView);
         });
 
-        // Reset: destructive, so it sits last and asks first.
+        // Reset — destructive, so it sits last and asks first.
         const resetGroup = new Adw.PreferencesGroup({
             title: _('Reset'),
             description: _('Return every Stage Manager preference to its default'),
@@ -469,7 +514,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
         return row;
     }
 
-    /** Ask before wiping settings; a reset is not undoable. */
+    /** Ask before wiping settings — a reset is not undoable. */
     _confirmReset(window, settings) {
         const dialog = new Adw.AlertDialog({
             heading: _('Reset All Settings?'),
@@ -559,7 +604,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
     }
 
     _captureShortcut(parent, settings, key) {
-        // Adw.MessageDialog is deprecated in favor of Adw.AlertDialog (1.6+), so prefer it when available.
+        // Adw.MessageDialog is deprecated in favor of Adw.AlertDialog (1.6+) — prefer it when available.
         const useAlert = typeof Adw.AlertDialog === 'function';
         const dialog = useAlert
             ? new Adw.AlertDialog({
@@ -611,7 +656,7 @@ export default class StageManagerPreferences extends ExtensionPreferences {
     }
 
     /** Read this extension's recent log lines out of the journal (Refresh button
-     *  only). There is no GIO API for the journal, so an async read-only subprocess is unavoidable. */
+     *  only) — no GIO API for the journal, so an async read-only subprocess is unavoidable. */
     _loadLogs(textView) {
         const buf = textView.get_buffer();
         let proc;

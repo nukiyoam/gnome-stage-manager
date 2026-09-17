@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="expose-tahoe">
+    <schema id="org.gnome.shell.extensions.expose-tahoe"
+            path="/org/gnome/shell/extensions/expose-tahoe/">
+
+        <key name="keybinding-all-windows" type="as">
+            <default>[]</default>
+            <summary>All Windows Shortcut</summary>
+            <description>Keyboard shortcut to enter Exposé showing every window on the active workspace. Empty array means no shortcut is bound.</description>
+        </key>
+
+        <key name="keybinding-app-expose" type="as">
+            <default>[]</default>
+            <summary>App Exposé Shortcut</summary>
+            <description>Keyboard shortcut to enter Exposé showing only the windows of the currently focused application. Empty array means no shortcut is bound.</description>
+        </key>
+
+        <key name="blur-enabled" type="b">
+            <default>true</default>
+            <summary>Blur Background</summary>
+            <description>Blur the desktop behind the window previews. Falls back to a plain dim if the compositor cannot capture the screen.</description>
+        </key>
+
+        <key name="dim-amount" type="d">
+            <default>0.55</default>
+            <range min="0.0" max="0.95"/>
+            <summary>Dim Amount</summary>
+            <description>How dark the desktop gets behind the window previews (0 = none, 1 = black).</description>
+        </key>
+
+        <key name="corner-radius" type="i">
+            <default>10</default>
+            <range min="0" max="40"/>
+            <summary>Corner Radius</summary>
+            <description>Corner radius of the window preview frames in pixels.</description>
+        </key>
+
+        <key name="animation-duration" type="i">
+            <default>220</default>
+            <range min="0" max="1000"/>
+            <summary>Animation Duration</summary>
+            <description>Duration of the enter/exit animation in milliseconds. Ignored when the system "Reduce Animation" toggle is on.</description>
+        </key>
+
+        <key name="max-scale" type="i">
+            <default>100</default>
+            <range min="50" max="100"/>
+            <summary>Maximum Scale</summary>
+            <description>Largest size a window preview is allowed to reach, as a percentage of its real size (prevents upscaling a lone small window).</description>
+        </key>
+
+        <key name="min-scale" type="i">
+            <default>18</default>
+            <range min="5" max="60"/>
+            <summary>Minimum Scale</summary>
+            <description>Smallest size a window preview is allowed to shrink to, as a percentage, when many windows are on screen.</description>
+        </key>
+
+    </schema>
+</schemalist>

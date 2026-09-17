@@ -132,6 +132,12 @@
             <description>Keyboard shortcut to toggle the stage sidebar visibility. Empty array means no shortcut is bound.</description>
         </key>
 
+        <key name="keybinding-show-desktop" type="as">
+            <default>[]</default>
+            <summary>Show Desktop Shortcut</summary>
+            <description>Keyboard shortcut to reveal the desktop by parking the current stage (Stack, groups mode) or minimizing every window (other modes and the Arc layout). Empty array means no shortcut is bound.</description>
+        </key>
+
         <key name="sidebar-layout" type="s">
             <default>'stack'</default>
             <choices>
@@ -139,7 +145,7 @@
                 <choice value="arc"/>
             </choices>
             <summary>Sidebar Layout</summary>
-            <description>Vertical stack (default) or a full carousel arc layout; see arc-panel-position for which edge it attaches to.</description>
+            <description>Vertical stack (default) or a full carousel arc layout — see arc-panel-position for which edge it attaches to.</description>
         </key>
 
         <key name="arc-angle-step" type="i">
@@ -195,6 +201,50 @@
             <range min="1" max="20"/>
             <summary>Arc Scroll Speed</summary>
             <description>Momentum-scroll speed for the arc sidebar carousel.</description>
+        </key>
+
+        <key name="arc-hover-fan-delay" type="i">
+            <default>0</default>
+            <range min="0" max="3000"/>
+            <summary>Arc Hover Fan Delay</summary>
+            <description>How long (milliseconds) the pointer must rest on a group before its windows fan out automatically. 0 disables hover fan-out, so a group only fans out when clicked or scrolled.</description>
+        </key>
+
+        <key name="arc-fan-hold" type="b">
+            <default>true</default>
+            <summary>Hold Expanded Group</summary>
+            <description>When enabled, a group expanded on hover or click stays expanded for the hold delay after the pointer leaves, before collapsing. When disabled, it collapses immediately.</description>
+        </key>
+
+        <key name="arc-fan-hold-delay" type="i">
+            <default>800</default>
+            <range min="0" max="5000"/>
+            <summary>Expanded Group Hold Delay</summary>
+            <description>How long (milliseconds) an expanded group stays expanded after the pointer leaves it, when the hold toggle is enabled.</description>
+        </key>
+
+        <key name="arc-hide-active" type="b">
+            <default>false</default>
+            <summary>Hide Active Card</summary>
+            <description>Hide the card (or group) that contains the currently focused window from the arc sidebar.</description>
+        </key>
+
+        <key name="arc-keep-visible" type="b">
+            <default>true</default>
+            <summary>Keep Windows Visible</summary>
+            <description>Keep previous windows visible when a new window opens (windows stack). When disabled, opening a new window minimizes the others so only the newest window is shown.</description>
+        </key>
+
+        <key name="arc-show-in-overview" type="b">
+            <default>true</default>
+            <summary>Show in Overview</summary>
+            <description>Show the arc sidebar while the GNOME overview is active. When disabled, the sidebar hides during the overview.</description>
+        </key>
+
+        <key name="arc-overview-merge" type="b">
+            <default>true</default>
+            <summary>Merge Apps Opened From Overview</summary>
+            <description>When an application is opened from the overview and an active card/group exists, join the new window to that active group instead of giving it its own card.</description>
         </key>
 
         <key name="arc-merge-map" type="s">

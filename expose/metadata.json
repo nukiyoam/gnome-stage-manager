@@ -1,0 +1,16 @@
+{
+  "description": "macOS Tahoe-style Exposé / Mission Control for GNOME. Scales all windows (or one app's windows) into a blurred overview so they all fit on screen; click to focus, arrow keys + Enter to choose, Tab to cycle apps, Esc to dismiss.",
+  "name": "Exposé (Tahoe)",
+  "gettext-domain": "expose-tahoe",
+  "settings-schema": "org.gnome.shell.extensions.expose-tahoe",
+  "shell-version": [
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "uuid": "expose@gnome-tahoe",
+  "version": 1,
+  "version-name": "1.0.0"
+}

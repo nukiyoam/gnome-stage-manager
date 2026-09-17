@@ -1,5 +1,6 @@
 dist/
 src/schemas/*.compiled
+expose/schemas/*.compiled
 *.zip
 .builddir/
 node_modules/
